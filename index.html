@@ -33,7 +33,7 @@
     <p>
         「センサー開始」を押し、許可を与えた後、
         <strong>スマートフォンを振る強さ</strong>で再生速度が変わります。<br>
-        <strong style="color: red;">※HTTPS接続が必要です</strong>
+        
     </p>
 
     <div id="waveform"></div>
@@ -50,12 +50,12 @@
 
     <script>
         // === 1. 基本設定 ===
-        
+
         const wavesurfer = WaveSurfer.create({
             container: '#waveform', waveColor: 'violet', progressColor: 'purple',
             barWidth: 3, barRadius: 3, cursorWidth: 1, height: 100, barGap: 3
         });
-        
+
         try { wavesurfer.load('kanon.mp3'); } catch (error) { /* ...エラー処理... */ }
 
         // 再生/一時停止ロジック
@@ -72,103 +72,112 @@
 
         // === 2. 速度マッピング定義 ===
 
-        // 21段階の速度マップ (前回と同じ)
         const speedMap = [
-            0.8, 0.82, 0.84, 0.86, 0.88, 0.9, 0.92, 0.94, 0.96, 
+            0.8, 0.82, 0.84, 0.86, 0.88, 0.9, 0.92, 0.94, 0.96,
             0.98, 1.0, 1.02, 1.04, 1.06, 1.08, 1.1, 1.12, 1.14,
             1.16, 1.18, 1.2
         ];
-        
-        // (インデックスの最大値)
         const MAX_INDEX = speedMap.length - 1; // 20
 
         // === 3. 加速度センサー処理 ===
 
         // --- 調整用パラメータ ---
-        // RMSの想定最大値 (この値で1.2xになります)
-        const MAX_RMS_EXPECTED = 10.0;
-        // 加速度バッファのサイズ (大きいほど滑らか、小さいほど敏感)
-        const windowSize = 15; // 15サンプル分
-        // 速度更新の間隔 (ミリ秒) - 処理負荷軽減（スロットリング）
-        const UPDATE_INTERVAL_MS = 200; // 0.2秒ごと
+        const MAX_RMS_EXPECTED = 10.0; // このRMS値で 1.2x になる
+        const windowSize = 15;
+        // ★【NEW】平滑化の係数 (0.01:すごく滑らか/遅い 〜 0.2:敏感/速い)
+        const SMOOTHING_FACTOR = 0.05;
         // ---------------------
 
         const buffer = [];
-        let lastUpdateTime = 0;
 
-        // メインの処理: devicemotion イベントハンドラ
+        // ★【NEW】状態を持つ変数
+        let targetRms = 0.0;      // センサーが検出した「目標」のRMS
+        let currentRms = 0.0;     // 平滑化された「現在」のRMS
+        let lastAppliedSpeed = 1.0; // 最後に適用した速度（最適化用）
+
+        // センサーイベントハンドラ (高頻度で呼ばれる)
         function handleMotion(event) {
-            const now = Date.now();
-            
-            // 1. RMS (標準偏差) の計算 (ご提示のコード)
             const a = event.accelerationIncludingGravity;
             if (!a) return;
-            const mag = Math.sqrt(a.x*a.x + a.y*a.y + a.z*a.z);
+            const mag = Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
             buffer.push(mag);
             if (buffer.length > windowSize) buffer.shift();
 
-            if (buffer.length < windowSize) return; // バッファが溜まるまで待つ
+            if (buffer.length < windowSize) return;
 
             const mean = buffer.reduce((s, v) => s + v, 0) / buffer.length;
             const rms = Math.sqrt(
                 buffer.reduce((s, v) => s + (v - mean) ** 2, 0) / buffer.length
             );
 
-            // 2. スロットリング (更新頻度を制限)
-            if (now - lastUpdateTime < UPDATE_INTERVAL_MS) {
-                return; // まだ更新しない
-            }
-            lastUpdateTime = now;
-
-            // 3. RMSから速度インデックスへのマッピング
-            // (a) RMS値を 0.0 〜 MAX_RMS_EXPECTED の範囲にクランプ(制限)
-            const clampedRms = Math.max(0, Math.min(rms, MAX_RMS_EXPECTED));
-            
-            // (b) 0.0〜1.0 の値に正規化
-            const normalizedValue = clampedRms / MAX_RMS_EXPECTED;
-            
-            // (c) 0〜20 のインデックスに変換し、四捨五入して整数にする
-            const targetIndex = Math.round(normalizedValue * MAX_INDEX);
-
-            // 4. 速度の決定と適用
-            const speed = speedMap[targetIndex];
-            
-            wavesurfer.setPlaybackRate(speed);
-
-            // 5. UIの更新
-            speedValueDisplay.textContent = `${speed.toFixed(2)}x`;
-            rmsValueDisplay.textContent = `${rms.toFixed(2)}`;
+            // ★【変更点】ここでは setPlaybackRate を呼ばず、目標値(targetRms)を更新するだけ
+            targetRms = rms;
         }
 
-        // === 4. センサー開始ボタンのロジック ===
+        // === 4. 【NEW】平滑化ループ (requestAnimationFrame) ===
+
+        function smoothUpdate() {
+            // (A) 「現在値」を「目標値」にじわじわ近づける (Exponential Moving Average)
+            // SMOOTHING_FACTOR が小さいほど滑らかになる
+            currentRms = (targetRms * SMOOTHING_FACTOR) + (currentRms * (1.0 - SMOOTHING_FACTOR));
+            
+            // (B) 平滑化された currentRms を使って速度インデックスを計算
+            const clampedRms = Math.max(0, Math.min(currentRms, MAX_RMS_EXPECTED));
+            const normalizedValue = clampedRms / MAX_RMS_EXPECTED;
+            const targetIndex = Math.round(normalizedValue * MAX_INDEX);
+            
+            // (C) 速度を決定
+            const targetSpeed = speedMap[targetIndex];
+
+            // (D) 速度が前回適用したものと実質的に変わった場合のみ、
+            //     setPlaybackRate() を呼び出す（処理負荷の最適化）
+            //     (toFixed(3) で丸めて比較)
+            if (targetSpeed.toFixed(3) !== lastAppliedSpeed.toFixed(3)) {
+                wavesurfer.setPlaybackRate(targetSpeed);
+                lastAppliedSpeed = targetSpeed; // 適用した速度を記憶
+                
+                // UIも更新
+                speedValueDisplay.textContent = `${targetSpeed.toFixed(2)}x`;
+            }
+            
+            // (おまけ) RMS値のUIだけは毎フレーム更新する
+            rmsValueDisplay.textContent = `${currentRms.toFixed(2)} (Target: ${targetRms.toFixed(2)})`;
+
+            // (E) 次のフレームでもこの関数を呼ぶ
+            requestAnimationFrame(smoothUpdate);
+        }
+
+        // === 5. センサー開始ボタン ===
 
         sensorBtn.addEventListener('click', () => {
-            // センサー許可をリクエストする標準的な方法
+            // 許可リクエスト
             if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-                // (主にiOS 13+ 用)
+                // iOS 13+
                 DeviceMotionEvent.requestPermission()
                     .then(permissionState => {
                         if (permissionState === 'granted') {
                             window.addEventListener('devicemotion', handleMotion);
-                            sensorBtn.textContent = 'センサー動作中';
-                            sensorBtn.disabled = true;
-                        } else {
-                            alert('センサーの許可が拒否されました。');
-                        }
+                            startApp();
+                        } else { alert('センサーが許可されませんでした。'); }
                     })
-                    .catch(error => {
-                        alert('センサー許可中にエラーが発生しました: ' + error.message);
-                    });
+                    .catch(error => { alert('センサー許可エラー: ' + error.message); });
             } else if ('DeviceMotionEvent' in window) {
-                // (主にAndroid用、または許可が不要なブラウザ)
+                // Android
                 window.addEventListener('devicemotion', handleMotion);
-                sensorBtn.textContent = 'センサー動作中';
-                sensorBtn.disabled = true;
+                startApp();
             } else {
                 alert('お使いのブラウザは加速度センサーに対応していません。');
             }
         });
-        
+
+        function startApp() {
+            sensorBtn.textContent = 'センサー動作中';
+            sensorBtn.disabled = true;
+            
+            // ★【NEW】平滑化ループを開始する
+            requestAnimationFrame(smoothUpdate);
+        }
+                
     </script>
 </body>
 </html>
