@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Audio Speed Control (Pitch Preserved)</title>
+    <title>Audio Speed Control (Motion-based)</title>
     
     <script src="https://unpkg.com/wavesurfer.js"></script>
     
@@ -11,112 +11,164 @@
         body { font-family: sans-serif; padding: 20px; max-width: 600px; margin: auto; }
         #waveform { border: 1px solid #ddd; border-radius: 4px; background: #f8f8f8; }
         button { margin: 5px; padding: 10px 15px; font-size: 16px; cursor: pointer; }
+        #sensorBtn { background-color: #28a745; color: white; }
         
-        /* --- スライダー用のスタイル --- */
-        .speed-control-slider {
-            margin-top: 20px;
-            display: flex;
-            align-items: center;
-            gap: 15px; /* ラベルとスライダーの間隔 */
-        }
-        #speedSlider {
-            width: 70%; /* スライダーの幅 */
-        }
+        .speed-display { margin-top: 15px; }
         #speedValue {
-            font-size: 1.2em;
+            font-size: 1.5em; /* 大きめに表示 */
             font-weight: bold;
             font-family: monospace;
-            min-width: 60px; /* "1.00x" が入る幅 */
-            text-align: right;
+            color: #007bff;
+        }
+        #rmsValue {
+            font-size: 0.9em;
+            font-family: monospace;
+            color: #666;
         }
     </style>
 </head>
 <body>
 
-    <h2>a.mp3 速度変更デモ (ピッチ維持)</h2>
+    <h2>a.mp3 速度変更デモ (加速度センサー連動)</h2>
+    <p>
+        「センサー開始」を押し、許可を与えた後、
+        <strong>スマートフォンを振る強さ</strong>で再生速度が変わります。<br>
+        <strong style="color: red;">※HTTPS接続が必要です</strong>
+    </p>
 
     <div id="waveform"></div>
     <hr>
 
     <button id="playPauseBtn">Play</button>
     
-    <div class="speed-control-slider">
-        <h3>再生速度:</h3>
-        <span id="speedValue">1.00x</span>
-        
-        <input type="range" id="speedSlider" min="0" max="20" value="10" step="1">
+    <button id="sensorBtn">センサー開始</button>
+    
+    <div class="speed-display">
+        再生速度: <span id="speedValue">1.00x</span><br>
+        モーション強度(rms): <span id="rmsValue">0.00</span>
     </div>
 
     <script>
-        // 4. WaveSurferの初期化
+        // === 1. 基本設定 ===
+        
         const wavesurfer = WaveSurfer.create({
-            container: '#waveform',
-            waveColor: 'violet',
-            progressColor: 'purple',
-            barWidth: 3,
-            barRadius: 3,
-            cursorWidth: 1,
-            height: 100,
-            barGap: 3
+            container: '#waveform', waveColor: 'violet', progressColor: 'purple',
+            barWidth: 3, barRadius: 3, cursorWidth: 1, height: 100, barGap: 3
         });
+        
+        try { wavesurfer.load('kanon.mp3'); } catch (error) { /* ...エラー処理... */ }
 
-        // 5. 音声ファイル (a.mp3) を読み込む
-        try {
-            wavesurfer.load('kanon.mp3');
-        } catch (error) {
-            console.error("Error loading a.mp3:", error);
-            document.body.append('Error loading a.mp3. Please check file path and CORS policy.');
-        }
-
-        // 6. 再生/一時停止ボタンのロジック
+        // 再生/一時停止ロジック
         const playPauseBtn = document.getElementById('playPauseBtn');
-        playPauseBtn.onclick = function() {
-            wavesurfer.playPause();
-        };
+        playPauseBtn.onclick = () => wavesurfer.playPause();
         wavesurfer.on('play', () => { playPauseBtn.textContent = 'Pause'; });
         wavesurfer.on('pause', () => { playPauseBtn.textContent = 'Play'; });
         wavesurfer.on('ready', () => { playPauseBtn.textContent = 'Play'; });
 
+        // UI要素
+        const speedValueDisplay = document.getElementById('speedValue');
+        const rmsValueDisplay = document.getElementById('rmsValue');
+        const sensorBtn = document.getElementById('sensorBtn');
 
-        // 7. 【変更点】スライダーのロジック
-        
-        // ご提示いただいた速度のリストを配列（マッピング）として定義
+        // === 2. 速度マッピング定義 ===
+
+        // 21段階の速度マップ (前回と同じ)
         const speedMap = [
             0.8, 0.82, 0.84, 0.86, 0.88, 0.9, 0.92, 0.94, 0.96, 
             0.98, 1.0, 1.02, 1.04, 1.06, 1.08, 1.1, 1.12, 1.14,
             1.16, 1.18, 1.2
         ];
+        
+        // (インデックスの最大値)
+        const MAX_INDEX = speedMap.length - 1; // 20
 
-        // HTML要素を取得
-        const speedSlider = document.getElementById('speedSlider');
-        const speedValueDisplay = document.getElementById('speedValue');
+        // === 3. 加速度センサー処理 ===
 
-        // スライダーが操作された時（ドラッグ中）に 'input' イベントが発生
-        speedSlider.addEventListener('input', (event) => {
-            // スライダーの値（0〜8）を取得
-            const index = parseInt(event.target.value, 10);
+        // --- 調整用パラメータ ---
+        // RMSの想定最大値 (この値で1.2xになります)
+        const MAX_RMS_EXPECTED = 10.0;
+        // 加速度バッファのサイズ (大きいほど滑らか、小さいほど敏感)
+        const windowSize = 15; // 15サンプル分
+        // 速度更新の間隔 (ミリ秒) - 処理負荷軽減（スロットリング）
+        const UPDATE_INTERVAL_MS = 200; // 0.2秒ごと
+        // ---------------------
+
+        const buffer = [];
+        let lastUpdateTime = 0;
+
+        // メインの処理: devicemotion イベントハンドラ
+        function handleMotion(event) {
+            const now = Date.now();
             
-            // 配列から対応する再生速度を取得
-            const speed = speedMap[index];
+            // 1. RMS (標準偏差) の計算 (ご提示のコード)
+            const a = event.accelerationIncludingGravity;
+            if (!a) return;
+            const mag = Math.sqrt(a.x*a.x + a.y*a.y + a.z*a.z);
+            buffer.push(mag);
+            if (buffer.length > windowSize) buffer.shift();
+
+            if (buffer.length < windowSize) return; // バッファが溜まるまで待つ
+
+            const mean = buffer.reduce((s, v) => s + v, 0) / buffer.length;
+            const rms = Math.sqrt(
+                buffer.reduce((s, v) => s + (v - mean) ** 2, 0) / buffer.length
+            );
+
+            // 2. スロットリング (更新頻度を制限)
+            if (now - lastUpdateTime < UPDATE_INTERVAL_MS) {
+                return; // まだ更新しない
+            }
+            lastUpdateTime = now;
+
+            // 3. RMSから速度インデックスへのマッピング
+            // (a) RMS値を 0.0 〜 MAX_RMS_EXPECTED の範囲にクランプ(制限)
+            const clampedRms = Math.max(0, Math.min(rms, MAX_RMS_EXPECTED));
             
-            // 1. WaveSurferの再生速度を変更
+            // (b) 0.0〜1.0 の値に正規化
+            const normalizedValue = clampedRms / MAX_RMS_EXPECTED;
+            
+            // (c) 0〜20 のインデックスに変換し、四捨五入して整数にする
+            const targetIndex = Math.round(normalizedValue * MAX_INDEX);
+
+            // 4. 速度の決定と適用
+            const speed = speedMap[targetIndex];
+            
             wavesurfer.setPlaybackRate(speed);
-            
-            // 2. 画面の表示を更新 (toFixed(2)で小数点以下2桁に整形)
+
+            // 5. UIの更新
             speedValueDisplay.textContent = `${speed.toFixed(2)}x`;
+            rmsValueDisplay.textContent = `${rms.toFixed(2)}`;
+        }
+
+        // === 4. センサー開始ボタンのロジック ===
+
+        sensorBtn.addEventListener('click', () => {
+            // センサー許可をリクエストする標準的な方法
+            if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+                // (主にiOS 13+ 用)
+                DeviceMotionEvent.requestPermission()
+                    .then(permissionState => {
+                        if (permissionState === 'granted') {
+                            window.addEventListener('devicemotion', handleMotion);
+                            sensorBtn.textContent = 'センサー動作中';
+                            sensorBtn.disabled = true;
+                        } else {
+                            alert('センサーの許可が拒否されました。');
+                        }
+                    })
+                    .catch(error => {
+                        alert('センサー許可中にエラーが発生しました: ' + error.message);
+                    });
+            } else if ('DeviceMotionEvent' in window) {
+                // (主にAndroid用、または許可が不要なブラウザ)
+                window.addEventListener('devicemotion', handleMotion);
+                sensorBtn.textContent = 'センサー動作中';
+                sensorBtn.disabled = true;
+            } else {
+                alert('お使いのブラウザは加速度センサーに対応していません。');
+            }
         });
         
-        // 読み込み完了時に、スライダーの初期値（1.0x）を反映
-        wavesurfer.on('ready', () => {
-            const initialIndex = parseInt(speedSlider.value, 10);
-            const initialSpeed = speedMap[initialIndex];
-            
-            // 念のため、初期速度を設定
-            wavesurfer.setPlaybackRate(initialSpeed); 
-            // 画面表示を初期化
-            speedValueDisplay.textContent = `${initialSpeed.toFixed(2)}x`;
-        });
-
     </script>
 </body>
 </html>
