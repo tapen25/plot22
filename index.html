@@ -54,7 +54,7 @@
             container: '#waveform', waveColor: 'violet', progressColor: 'purple',
             barWidth: 3, barRadius: 3, cursorWidth: 1, height: 100, barGap: 3
         });
-        try { wavesurfer.load('a.mp3'); } catch (error) { /* ...エラー処理... */ }
+        try { wavesurfer.load('kanon.mp3'); } catch (error) { /* ...エラー処理... */ }
         const playPauseBtn = document.getElementById('playPauseBtn');
         playPauseBtn.onclick = () => wavesurfer.playPause();
         wavesurfer.on('play', () => { playPauseBtn.textContent = 'Pause'; });
