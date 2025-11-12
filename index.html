@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Speed Control (Pitch Preserved)</title>
+    
+    <script src="https://unpkg.com/wavesurfer.js"></script>
+    
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 600px; margin: auto; }
+        #waveform { border: 1px solid #ddd; border-radius: 4px; background: #f8f8f8; }
+        button { margin: 5px; padding: 10px 15px; font-size: 16px; cursor: pointer; }
+        
+        /* --- スライダー用のスタイル --- */
+        .speed-control-slider {
+            margin-top: 20px;
+            display: flex;
+            align-items: center;
+            gap: 15px; /* ラベルとスライダーの間隔 */
+        }
+        #speedSlider {
+            width: 70%; /* スライダーの幅 */
+        }
+        #speedValue {
+            font-size: 1.2em;
+            font-weight: bold;
+            font-family: monospace;
+            min-width: 60px; /* "1.00x" が入る幅 */
+            text-align: right;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>a.mp3 速度変更デモ (ピッチ維持)</h2>
+
+    <div id="waveform"></div>
+    <hr>
+
+    <button id="playPauseBtn">Play</button>
+    
+    <div class="speed-control-slider">
+        <h3>再生速度:</h3>
+        <span id="speedValue">1.00x</span>
+        
+        <input type="range" id="speedSlider" min="0" max="20" value="10" step="1">
+    </div>
+
+    <script>
+        // 4. WaveSurferの初期化
+        const wavesurfer = WaveSurfer.create({
+            container: '#waveform',
+            waveColor: 'violet',
+            progressColor: 'purple',
+            barWidth: 3,
+            barRadius: 3,
+            cursorWidth: 1,
+            height: 100,
+            barGap: 3
+        });
+
+        // 5. 音声ファイル (a.mp3) を読み込む
+        try {
+            wavesurfer.load('kanon.mp3');
+        } catch (error) {
+            console.error("Error loading a.mp3:", error);
+            document.body.append('Error loading a.mp3. Please check file path and CORS policy.');
+        }
+
+        // 6. 再生/一時停止ボタンのロジック
+        const playPauseBtn = document.getElementById('playPauseBtn');
+        playPauseBtn.onclick = function() {
+            wavesurfer.playPause();
+        };
+        wavesurfer.on('play', () => { playPauseBtn.textContent = 'Pause'; });
+        wavesurfer.on('pause', () => { playPauseBtn.textContent = 'Play'; });
+        wavesurfer.on('ready', () => { playPauseBtn.textContent = 'Play'; });
+
+
+        // 7. 【変更点】スライダーのロジック
+        
+        // ご提示いただいた速度のリストを配列（マッピング）として定義
+        const speedMap = [
+            0.8, 0.82, 0.84, 0.86, 0.88, 0.9, 0.92, 0.94, 0.96, 
+            0.98, 1.0, 1.02, 1.04, 1.06, 1.08, 1.1, 1.12, 1.14,
+            1.16, 1.18, 1.2
+        ];
+
+        // HTML要素を取得
+        const speedSlider = document.getElementById('speedSlider');
+        const speedValueDisplay = document.getElementById('speedValue');
+
+        // スライダーが操作された時（ドラッグ中）に 'input' イベントが発生
+        speedSlider.addEventListener('input', (event) => {
+            // スライダーの値（0〜8）を取得
+            const index = parseInt(event.target.value, 10);
+            
+            // 配列から対応する再生速度を取得
+            const speed = speedMap[index];
+            
+            // 1. WaveSurferの再生速度を変更
+            wavesurfer.setPlaybackRate(speed);
+            
+            // 2. 画面の表示を更新 (toFixed(2)で小数点以下2桁に整形)
+            speedValueDisplay.textContent = `${speed.toFixed(2)}x`;
+        });
+        
+        // 読み込み完了時に、スライダーの初期値（1.0x）を反映
+        wavesurfer.on('ready', () => {
+            const initialIndex = parseInt(speedSlider.value, 10);
+            const initialSpeed = speedMap[initialIndex];
+            
+            // 念のため、初期速度を設定
+            wavesurfer.setPlaybackRate(initialSpeed); 
+            // 画面表示を初期化
+            speedValueDisplay.textContent = `${initialSpeed.toFixed(2)}x`;
+        });
+
+    </script>
+</body>
+</html>
